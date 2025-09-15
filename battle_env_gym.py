@@ -1,0 +1,305 @@
+import math
+import random
+from typing import Optional, Tuple, Dict, Any
+
+import numpy as np
+
+# Gymnasium API (Python 3.11 compatible)
+import gymnasium as gym
+from gymnasium import spaces
+
+# Local simulation entities (pygame-backed drawing kept intact)
+from entities import Boss, Agent, WIDTH, HEIGHT
+
+
+class BattleArenaEnv(gym.Env):
+    """Gym 0.21-compatible environment wrapping the boss-vs-agent simulator.
+
+    Notes for learning:
+    - Actions are discrete with 9 choices (no-op + 8 move directions). Attacks are handled by the Agent logic.
+    - Observations are a normalized vector (agent-centric and boss-centric features).
+    - Reward is dense: +damage dealt, -damage taken, +small survival, terminal bonuses.
+
+    TODO: Try adding more observation features (e.g., boss ability one-hot) once the baseline works.
+    TODO: Experiment with different rewards or curriculum (easier boss) to stabilize early learning.
+    """
+
+    metadata = {"render.modes": ["human", "rgb_array"]}
+
+    def __init__(self,
+                 max_steps: int = 1000,
+                 role: str = "warrior",
+                 headless: bool = True,
+                 seed: Optional[int] = None):
+        super().__init__()
+        self.max_steps = max_steps
+        self.role = role
+        self.headless = headless
+
+        # Discrete 9: no-op, 8 directions
+        self.action_space = spaces.Discrete(9)
+
+        # Observation vector (12 dims):
+        # agent_hp, agent_x, agent_y,
+        # boss_hp, rel_x, rel_y, dist,
+        # active_ability_id (0-3 normalized), ability_ticks_remaining (0..1),
+        # step_progress (0..1), speed_norm (0..1)
+        # NOTE: compact to keep learnable; you can extend later.
+        low = np.array([0.0, 0.0, 0.0,
+                        0.0, -1.0, -1.0, 0.0,
+                        0.0, 0.0,
+                        0.0, 0.0], dtype=np.float32)
+        high = np.array([1.0, 1.0, 1.0,
+                         1.0, 1.0, 1.0, 1.0,
+                         1.0, 1.0,
+                         1.0, 1.0], dtype=np.float32)
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+        # Internal state
+        self.boss: Optional[Boss] = None
+        self.agent: Optional[Agent] = None
+        self.num_steps = 0
+        self.prev_boss_health = None
+        self.prev_agent_health = None
+        self.prev_distance_norm = None  # For distance-based shaping
+
+        # Rendering (lazy init to avoid pygame overhead in training)
+        self._pygame_init_done = False
+        self._screen = None
+        self._clock = None
+        self._font = None
+        self.overlay_text: Optional[str] = None  # Set by trainer for on-screen info
+
+        if seed is not None:
+            self.seed(seed)
+
+    def seed(self, seed: Optional[int] = None):
+        random.seed(seed)
+        np.random.seed(seed)
+        return [seed]
+
+    # --- Gymnasium API ---
+    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        if seed is not None:
+            self.seed(seed)
+        # Deterministic spawn positions
+        self.boss = Boss(x=WIDTH // 2, y=100, health=1000)
+        self.agent = Agent(x=WIDTH // 2, y=200, role=self.role)
+
+        self.num_steps = 0
+        self.prev_boss_health = self.boss.health
+        self.prev_agent_health = self.agent.health
+        # Initialize previous distance (normalized) for shaping
+        initial_dist = math.hypot(self.boss.x - self.agent.x, self.boss.y - self.agent.y)
+        self.prev_distance_norm = min(1.0, initial_dist / max(WIDTH, HEIGHT))
+
+        obs = self._get_observation()
+        info: Dict[str, Any] = {}
+        return obs, info
+
+    def step(self, action: int):
+        assert self.boss is not None and self.agent is not None, "Call reset() before step()"
+
+        # Map discrete action to direction unit vector
+        dx, dy = self._action_to_unit_vector(action)
+
+        # Move agent using a goal point one step in the chosen direction
+        goal_x = self.agent.x + dx
+        goal_y = self.agent.y + dy
+        self.agent.move(goal_x=goal_x, goal_y=goal_y)
+
+        # Agent attacks or heals (single-agent: allies list contains only itself)
+        self.agent.attack_or_heal(self.boss, [self.agent])
+
+        # Boss AI step
+        self.boss.step([self.agent])
+
+        # Compute reward components
+        damage_dealt = max(0, (self.prev_boss_health - self.boss.health))
+        damage_taken = max(0, (self.prev_agent_health - self.agent.health))
+
+        # Scale and clip
+        reward = 0.0
+        reward += min(1.0, 0.1 * damage_dealt)
+        reward -= 0.25 * damage_taken
+        reward += 0.001  # survival shaping
+
+        # Distance shaping (potential-based): reward progress towards boss
+        # NOTE: This encourages approaching the boss. For ranged roles, consider
+        # a role-specific target distance instead of pure closeness.e
+        current_dist = math.hypot(self.boss.x - self.agent.x, self.boss.y - self.agent.y)
+        current_dist_norm = min(1.0, current_dist / max(WIDTH, HEIGHT))
+        if self.prev_distance_norm is not None and current_dist >= 240:
+            reward -= 0.10 * (self.prev_distance_norm - current_dist_norm)
+        elif self.prev_distance_norm is not None and current_dist >40 and current_dist <240:
+            reward += 0.05 * (self.prev_distance_norm - current_dist_norm)
+        elif self.prev_distance_norm is not None and current_dist <= 40:
+            reward -= 0.10 * (self.prev_distance_norm - current_dist_norm)
+        
+        # Set current as previous for next step
+        self.prev_distance_norm = current_dist_norm
+
+        self.prev_boss_health = self.boss.health
+        self.prev_agent_health = self.agent.health
+
+        self.num_steps += 1
+
+        terminated = False
+        truncated = False
+
+        if self.boss.health <= 0:
+            terminated = True
+            reward += 25.0
+        if self.agent.health <= 0:
+            terminated = True
+            if self.boss.health == self.boss.max_health:
+                reward -=20
+            reward -= 10
+        if self.num_steps >= self.max_steps:
+            truncated = True
+
+        obs = self._get_observation()
+        info: Dict[str, Any] = {}
+
+        return obs, reward, terminated, truncated, info
+
+    # --- Observation and action helpers ---
+    def _get_observation(self) -> np.ndarray:
+        agent = self.agent
+        boss = self.boss
+        assert agent is not None and boss is not None
+
+        agent_hp = agent.health / max(1, agent.max_health)
+        agent_x = agent.x / WIDTH
+        agent_y = agent.y / HEIGHT
+
+        boss_hp = boss.health / max(1, boss.max_health)
+        rel_x = (boss.x - agent.x) / WIDTH
+        rel_y = (boss.y - agent.y) / HEIGHT
+        dist = math.hypot(boss.x - agent.x, boss.y - agent.y)
+        dist_norm = min(1.0, dist / max(WIDTH, HEIGHT))
+
+        # Active ability compact encoding
+        ability_id = 0.0
+        ticks_norm = 0.0
+        if boss.active_ability is not None:
+            name = boss.active_ability.name
+            # TODO: Consider one-hot ability encoding for better learnability
+            name_to_id = {"Frontal Cone": 0, "Tank Buster": 1, "Fireball": 2}
+            ability_id = (name_to_id.get(name, 0)) / 2.0  # normalized to [0,1]
+            # Normalize by a conservative max windup (e.g., 40 ticks)
+            ticks_norm = min(1.0, boss.ability_ticks_remaining / 40.0)
+
+        step_progress = self.num_steps / max(1, self.max_steps)
+        speed_norm = min(1.0, agent.speed / 5.0)
+
+        obs = np.array([
+            agent_hp, agent_x, agent_y,
+            boss_hp, rel_x, rel_y, dist_norm,
+            ability_id, ticks_norm,
+            step_progress, speed_norm
+        ], dtype=np.float32)
+        return obs
+
+    @staticmethod
+    def _action_to_unit_vector(action: int) -> Tuple[float, float]:
+        # 0: stay, 1-8: compass + diagonals (N, NE, E, SE, S, SW, W, NW)
+        mapping = {
+            0: (0.0, 0.0),
+            1: (0.0, -1.0),
+            2: (1.0, -1.0),
+            3: (1.0, 0.0),
+            4: (1.0, 1.0),
+            5: (0.0, 1.0),
+            6: (-1.0, 1.0),
+            7: (-1.0, 0.0),
+            8: (-1.0, -1.0),
+        }
+        dx, dy = mapping.get(action, (0.0, 0.0))
+        # Normalize diagonal speed to keep consistent per-step distance before Agent.speed scaling
+        length = math.hypot(dx, dy)
+        if length > 0:
+            dx /= length
+            dy /= length
+        return dx, dy
+
+    # --- Rendering ---
+    def render(self, mode: str = "human"):
+        # Lazy import pygame to avoid training overhead
+        import pygame  # noqa: WPS433
+
+        if self.headless and mode == "human":
+            # Headless mode requested human render: ignore silently
+            return None
+
+        if not self._pygame_init_done:
+            pygame.init()
+            self._screen = pygame.display.set_mode((WIDTH, HEIGHT))
+            pygame.display.set_caption("Battle Arena Env")
+            self._clock = pygame.time.Clock()
+            try:
+                pygame.font.init()
+                self._font = pygame.font.SysFont("consolas", 16)
+            except Exception:
+                self._font = None
+            self._pygame_init_done = True
+
+        assert self._screen is not None
+        screen = self._screen
+        screen.fill((24, 24, 28))
+
+        # Handle quit events lightly to keep window responsive during eval
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                # Optional: set a flag or simply close
+                pygame.display.quit()
+                self._pygame_init_done = False
+                return None
+
+        # Delegate drawing to existing classes
+        if self.boss is not None:
+            self.boss.draw(screen)
+        if self.agent is not None:
+            self.agent.draw(screen)
+
+        # Overlays: health labels and training text
+        if self._font is not None:
+            if self.boss is not None:
+                boss_hp_text = f"Boss HP: {int(self.boss.health)} / {int(self.boss.max_health)}"
+                boss_surf = self._font.render(boss_hp_text, True, (240, 240, 240))
+                screen.blit(boss_surf, (self.boss.x - boss_surf.get_width() // 2, self.boss.y + self.boss.radius + 6))
+            if self.agent is not None:
+                agent_hp_text = f"{self.agent.role.capitalize()} HP: {int(self.agent.health)} / {int(self.agent.max_health)}"
+                agent_surf = self._font.render(agent_hp_text, True, (240, 240, 240))
+                screen.blit(agent_surf, (self.agent.x - agent_surf.get_width() // 2, self.agent.y - self.agent.radius - 20))
+
+            if self.overlay_text:
+                overlay_surf = self._font.render(self.overlay_text, True, (200, 220, 255))
+                screen.blit(overlay_surf, (10, 10))
+
+        pygame.display.flip()
+        if self._clock is not None:
+            self._clock.tick(60)  # limit FPS during visualization
+
+        if mode == "rgb_array":
+            # Return an RGB array of the current frame
+            return np.transpose(
+                np.array(pygame.surfarray.pixels3d(screen)), (1, 0, 2)
+            ).copy()
+        return None
+
+    def close(self):
+        if self._pygame_init_done:
+            try:
+                import pygame  # noqa: WPS433
+                pygame.display.quit()
+            except Exception:
+                pass
+        self._pygame_init_done = False
+
+
+# Convenience factory for gym.make users if desired
+def make_env(**kwargs) -> BattleArenaEnv:
+    return BattleArenaEnv(**kwargs)
+
+
