@@ -7,7 +7,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-import gymnasium as gym
+import gymnasium as gympip
 
 from battle_env_gym import BattleArenaEnv
 
