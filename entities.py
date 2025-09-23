@@ -26,23 +26,23 @@ class Boss:
         self.radius = 30
         self.ticks = 0
         self.abilities = {
-            "Frontal Cone": Ability("Frontal Cone", damage=125, range=1000, aoe_shape='cone', aoe_radius=200, cooldown=30),
+            "Frontal Cone": Ability("Frontal Cone", damage=125, range=200, aoe_shape='cone', aoe_radius=200, cooldown=150),
             "Tank Buster": Ability("Tank Buster", damage=125, range=20, aoe_shape='single-target', aoe_radius=0, cooldown=10),
-            "Fireball": Ability("Fireball", damage=60, range=1000, aoe_shape='aoe-ground-effect', aoe_radius=5, cooldown=40)}
+            "Fireball": Ability("Fireball", damage=135, range=1000, aoe_shape='aoe-ground-effect', aoe_radius=5, cooldown=100)}
         self.active_ability = None
         self.active_ability_target = None
         self.affected_agents = None
         self.fireball_zones = []
         self.fireball_radius = 8
         self.ability_ticks_remaining = 0
+        self.cone_vertices = None  # Store fixed cone vertices
         
 
 
     def draw(self, screen):
         pygame.draw.circle(screen, self.color, (self.x, self.y), self.radius)
-        if self.active_ability is not None and self.active_ability_target is not None:
-            points = self.get_cone_vertices(self.active_ability, self.active_ability_target)
-            pygame.draw.polygon(screen, (255, 100, 100), points)
+        if self.active_ability is not None and self.active_ability.name == 'Frontal Cone' and self.cone_vertices is not None:
+            pygame.draw.polygon(screen, (255, 100, 100), self.cone_vertices)
         if getattr(self, "fireball_zones", None):
             for (fx, fy) in self.fireball_zones:
                 pygame.draw.circle(screen, (255, 0, 0), (int(fx), int(fy)), self.fireball_radius * 2, 2)
@@ -67,12 +67,14 @@ class Boss:
                     elif ability.name == "Frontal Cone" and math.hypot(dx,dy) <= ability.range:
                         self.active_ability_target = nearest_agent
                         self.active_ability = ability
-                        self.ability_ticks_remaining = 15
+                        self.ability_ticks_remaining = 20
+                        # Calculate and store fixed cone vertices
+                        self.cone_vertices = self.get_cone_vertices(ability, nearest_agent)
                         ability.last_used_tick = self.ticks
                     elif ability.name == 'Fireball' and math.hypot(dx,dy) <= ability.range:
                         self.fireball_zones = [(a.x,a.y) for a in alive_agents]
                         self.active_ability = ability
-                        self.ability_ticks_remaining = 10
+                        self.ability_ticks_remaining = 20
                         ability.last_used_tick = self.ticks
 
         else:
@@ -81,17 +83,18 @@ class Boss:
             else:
                 if self.active_ability.name == 'Frontal Cone':
                     for agent in alive_agents:
-                        if self.agent_in_cone(agent, self.active_ability, self.active_ability_target):
+                        if self.cone_vertices is not None and self._point_in_triangle(agent.x, agent.y, self.cone_vertices):
                             agent.health -= self.active_ability.damage
                             print(f"{self.name} hits {agent.role} with {self.active_ability.name} for {self.active_ability.damage} damage")
                     self.active_ability = None
                     self.active_ability_target = None
+                    self.cone_vertices = None  # Clear the cone when ability finishes
                 elif self.active_ability.name == 'Fireball':
                     for (fx,fy) in self.fireball_zones:
                         for agent in alive_agents:
                             if self.agent_in_fireball(agent, (fx,fy), self.fireball_radius):
                                 agent.health -= self.active_ability.damage
-                                print(f"{self.name} hits {agent.role} with {self.active_ability.name} for {self.active_ability.damage} damage")
+                                #print(f"{self.name} hits {agent.role} with {self.active_ability.name} for {self.active_ability.damage} damage")
                     self.active_ability = None
                     self.fireball_zones = []
         self.ticks += 1
@@ -134,6 +137,17 @@ class Boss:
             cos_theta = max(-1, min(1, cos_theta))
             angle_to_agent = math.acos(cos_theta)
         return dist <= ability.aoe_radius and abs(angle_to_agent) < math.radians(20) / 2
+
+    def _point_in_triangle(self, px, py, tri):
+        (x1, y1), (x2, y2), (x3, y3) = tri
+        # Barycentric method
+        denom = ((y2 - y3)*(x1 - x3) + (x3 - x2)*(y1 - y3))
+        if denom == 0:
+            return False
+        a = ((y2 - y3)*(px - x3) + (x3 - x2)*(py - y3)) / denom
+        b = ((y3 - y1)*(px - x3) + (x1 - x3)*(py - y3)) / denom
+        c = 1 - a - b
+        return (a >= 0) and (b >= 0) and (c >= 0)
     
     def agent_in_fireball(self, agent, center, radius):
         dist = math.hypot(agent.x - center[0], agent.y-center[1])
@@ -144,7 +158,7 @@ class Boss:
 # ------------------- AGENTS -------------------
 class Agent:
     role_colors = {"warrior": BROWN, "archer": GREEN, "healer": PINK} # add classes later
-    role_damage = {"warrior": 10, "archer": 7.5, "healer": 5} # add classes later
+    role_damage = {"warrior": 10, "archer": 2, "healer": 5} # add classes later
     role_heal = {"warrior": 0, "archer": 0, "healer": 10}
     role_health = {"warrior": 125, "archer": 135, "healer": 80} 
     role_speed = {"warrior": 1.5, "archer": 3, "healer": 1} 

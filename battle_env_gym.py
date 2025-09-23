@@ -36,8 +36,8 @@ class BattleArenaEnv(gym.Env):
         self.role = role
         self.headless = headless
 
-        # Discrete 9: no-op, 8 directions
-        self.action_space = spaces.Discrete(9)
+        # Discrete 10: no-op, 8 directions, attack
+        self.action_space = spaces.Discrete(10)
 
         # Observation vector (12 dims):
         # agent_hp, agent_x, agent_y,
@@ -69,6 +69,8 @@ class BattleArenaEnv(gym.Env):
         self._clock = None
         self._font = None
         self.overlay_text: Optional[str] = None  # Set by trainer for on-screen info
+        self.action_history = []
+        self.max_history = 20
 
         if seed is not None:
             self.seed(seed)
@@ -84,7 +86,7 @@ class BattleArenaEnv(gym.Env):
             self.seed(seed)
         # Deterministic spawn positions
         self.boss = Boss(x=WIDTH // 2, y=100, health=1000)
-        self.agent = Agent(x=WIDTH // 2, y=200, role=self.role)
+        self.agent = Agent(x=random.randint(300,500) // 2, y=random.randint(200,400), role=self.role)
 
         self.num_steps = 0
         self.prev_boss_health = self.boss.health
@@ -100,16 +102,20 @@ class BattleArenaEnv(gym.Env):
     def step(self, action: int):
         assert self.boss is not None and self.agent is not None, "Call reset() before step()"
 
+        # Track history of actions
+        self.action_history.append(action)
+        if len(self.action_history) > self.max_history:
+            self.action_history.pop(0)
+
+        if action == 9:
+            self.agent.attack_or_heal(self.boss, [self.agent])
+        else:
         # Map discrete action to direction unit vector
-        dx, dy = self._action_to_unit_vector(action)
-
-        # Move agent using a goal point one step in the chosen direction
-        goal_x = self.agent.x + dx
-        goal_y = self.agent.y + dy
-        self.agent.move(goal_x=goal_x, goal_y=goal_y)
-
-        # Agent attacks or heals (single-agent: allies list contains only itself)
-        self.agent.attack_or_heal(self.boss, [self.agent])
+            dx, dy = self._action_to_unit_vector(action)
+            # Move agent using a goal point one step in the chosen direction
+            goal_x = self.agent.x + dx
+            goal_y = self.agent.y + dy
+            self.agent.move(goal_x=goal_x, goal_y=goal_y)
 
         # Boss AI step
         self.boss.step([self.agent])
@@ -120,8 +126,8 @@ class BattleArenaEnv(gym.Env):
 
         # Scale and clip
         reward = 0.0
-        reward += min(1.0, 0.1 * damage_dealt)
-        reward -= 0.25 * damage_taken
+        reward += min(1.0, 0.05 * damage_dealt)
+        reward -= min(1.0 ,0.15 * damage_taken)
         reward += 0.001  # survival shaping
 
         # Distance shaping (potential-based): reward progress towards boss
@@ -130,12 +136,20 @@ class BattleArenaEnv(gym.Env):
         current_dist = math.hypot(self.boss.x - self.agent.x, self.boss.y - self.agent.y)
         current_dist_norm = min(1.0, current_dist / max(WIDTH, HEIGHT))
         if self.prev_distance_norm is not None and current_dist >= 240:
-            reward -= 0.10 * (self.prev_distance_norm - current_dist_norm)
+            reward -= 0.40 * (self.prev_distance_norm - current_dist_norm)
         elif self.prev_distance_norm is not None and current_dist >40 and current_dist <240:
-            reward += 0.05 * (self.prev_distance_norm - current_dist_norm)
+            reward += 0.25 * (self.prev_distance_norm - current_dist_norm)
         elif self.prev_distance_norm is not None and current_dist <= 40:
-            reward -= 0.10 * (self.prev_distance_norm - current_dist_norm)
-        
+            reward -= 0.40 * (self.prev_distance_norm - current_dist_norm)
+
+        # Retreat penalty only when not dodging
+        is_telegraphed = (self.boss.active_ability is not None)
+        if self.prev_distance_norm is not None:
+            dist_diff = current_dist - (self.prev_distance_norm * max(WIDTH, HEIGHT))
+            if dist_diff > 2.0:  # moved away
+                reward += 0.10 if is_telegraphed else -0.10
+
+            
         # Set current as previous for next step
         self.prev_distance_norm = current_dist_norm
 
@@ -149,14 +163,15 @@ class BattleArenaEnv(gym.Env):
 
         if self.boss.health <= 0:
             terminated = True
-            reward += 25.0
+            reward += 40
         if self.agent.health <= 0:
             terminated = True
             if self.boss.health == self.boss.max_health:
-                reward -=20
-            reward -= 10
+                reward -=40
+            reward -= 20
         if self.num_steps >= self.max_steps:
             truncated = True
+            reward -=20
 
         obs = self._get_observation()
         info: Dict[str, Any] = {}
@@ -188,7 +203,7 @@ class BattleArenaEnv(gym.Env):
             name_to_id = {"Frontal Cone": 0, "Tank Buster": 1, "Fireball": 2}
             ability_id = (name_to_id.get(name, 0)) / 2.0  # normalized to [0,1]
             # Normalize by a conservative max windup (e.g., 40 ticks)
-            ticks_norm = min(1.0, boss.ability_ticks_remaining / 40.0)
+            ticks_norm = min(1.0, boss.ability_ticks_remaining / 20)
 
         step_progress = self.num_steps / max(1, self.max_steps)
         speed_norm = min(1.0, agent.speed / 5.0)
@@ -277,6 +292,12 @@ class BattleArenaEnv(gym.Env):
                 overlay_surf = self._font.render(self.overlay_text, True, (200, 220, 255))
                 screen.blit(overlay_surf, (10, 10))
 
+        if self.action_history:
+            action_names = [self._action_to_name(a) for a in self.action_history] 
+            history_text = "Actions: " + " ".join(action_names)
+            history_surf = self._font.render(history_text, True, (0,255,0))
+            screen.blit(history_surf, (10,550))
+
         pygame.display.flip()
         if self._clock is not None:
             self._clock.tick(60)  # limit FPS during visualization
@@ -296,6 +317,13 @@ class BattleArenaEnv(gym.Env):
             except Exception:
                 pass
         self._pygame_init_done = False
+
+    def _action_to_name(self, action: int) -> str:
+        action_names = {
+            0: "x", 1: "↑", 2: "↓", 3: "←", 4: "→",
+            5: "↖", 6: "↗", 7: "↙", 8: "↘", 9: "⚔"
+        }
+        return action_names.get(action, f"Unknown({action})")
 
 
 # Convenience factory for gym.make users if desired

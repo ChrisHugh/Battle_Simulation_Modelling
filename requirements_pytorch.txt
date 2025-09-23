@@ -1,0 +1,13 @@
+# PyTorch requirements
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Environment
+gymnasium>=0.28.0
+numpy>=1.21.0
+pygame>=2.1.0
+
+# Optional: for better performance
+# torch-audio  # if you need audio processing
+# torchvision  # if you need computer vision
