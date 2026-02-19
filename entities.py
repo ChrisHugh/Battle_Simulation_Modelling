@@ -28,7 +28,7 @@ class Boss:
         self.abilities = {
             "Frontal Cone": Ability("Frontal Cone", damage=125, range=200, aoe_shape='cone', aoe_radius=200, cooldown=150),
             "Tank Buster": Ability("Tank Buster", damage=125, range=20, aoe_shape='single-target', aoe_radius=0, cooldown=10),
-            "Fireball": Ability("Fireball", damage=135, range=1000, aoe_shape='aoe-ground-effect', aoe_radius=5, cooldown=100)}
+            "Fireball": Ability("Fireball", damage=70, range=1000, aoe_shape='aoe-ground-effect', aoe_radius=5, cooldown=100)}
         self.active_ability = None
         self.active_ability_target = None
         self.affected_agents = None
@@ -85,7 +85,7 @@ class Boss:
                     for agent in alive_agents:
                         if self.cone_vertices is not None and self._point_in_triangle(agent.x, agent.y, self.cone_vertices):
                             agent.health -= self.active_ability.damage
-                            print(f"{self.name} hits {agent.role} with {self.active_ability.name} for {self.active_ability.damage} damage")
+                            #print(f"{self.name} hits {agent.role} with {self.active_ability.name} for {self.active_ability.damage} damage")
                     self.active_ability = None
                     self.active_ability_target = None
                     self.cone_vertices = None  # Clear the cone when ability finishes

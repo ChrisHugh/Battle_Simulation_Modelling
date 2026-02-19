@@ -66,17 +66,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Evaluation-only exploration (does not affect training)
-    eval_epsilon = 0.05
-
     # Create environment
-    environment = BattleArenaEnv(max_steps=600, role="archer", headless=False)
+    environment = BattleArenaEnv(max_steps=1500, role="archer", headless=False)
     num_actions = environment.action_space.n
     observation, _ = environment.reset()
     observation_size = int(np.prod(observation.shape))
 
     # Load trained model
-    model_path = "models/dqn_pytorch_model.pth"
+    model_path = "models/dqn_pytorch_parallel_model.pth"
     try:
         model = load_model(model_path, observation_size, num_actions, device)
         print(f"Model loaded from {model_path}")
@@ -90,13 +87,9 @@ def main():
     step = 0
     
     while True:
-        # Get action from model with optional evaluation exploration
-        if np.random.rand() < eval_epsilon:
-            action = environment.action_space.sample()
-        else:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-            with torch.no_grad():
-                action = int(torch.argmax(model(state_tensor), dim=1).item())
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        with torch.no_grad():
+            action = int(torch.argmax(model(state_tensor), dim=1).item())
 
         # Take step
         next_state, reward, terminated, truncated, _ = environment.step(action)

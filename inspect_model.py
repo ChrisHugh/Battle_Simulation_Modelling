@@ -49,6 +49,7 @@ def get_action_names():
         "southwest",
         "west",
         "northwest",
+        "attack",
     ]
 
 

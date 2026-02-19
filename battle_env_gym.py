@@ -19,9 +19,6 @@ class BattleArenaEnv(gym.Env):
     - Actions are discrete with 9 choices (no-op + 8 move directions). Attacks are handled by the Agent logic.
     - Observations are a normalized vector (agent-centric and boss-centric features).
     - Reward is dense: +damage dealt, -damage taken, +small survival, terminal bonuses.
-
-    TODO: Try adding more observation features (e.g., boss ability one-hot) once the baseline works.
-    TODO: Experiment with different rewards or curriculum (easier boss) to stabilize early learning.
     """
 
     metadata = {"render.modes": ["human", "rgb_array"]}
@@ -126,21 +123,64 @@ class BattleArenaEnv(gym.Env):
 
         # Scale and clip
         reward = 0.0
-        reward += min(1.0, 0.05 * damage_dealt)
-        reward -= min(1.0 ,0.15 * damage_taken)
+        reward += min(3, 0.1 * damage_dealt)
+        reward -= min(10, 0.5 * damage_taken)
         reward += 0.001  # survival shaping
 
         # Distance shaping (potential-based): reward progress towards boss
-        # NOTE: This encourages approaching the boss. For ranged roles, consider
-        # a role-specific target distance instead of pure closeness.e
         current_dist = math.hypot(self.boss.x - self.agent.x, self.boss.y - self.agent.y)
         current_dist_norm = min(1.0, current_dist / max(WIDTH, HEIGHT))
-        if self.prev_distance_norm is not None and current_dist >= 240:
-            reward -= 0.40 * (self.prev_distance_norm - current_dist_norm)
-        elif self.prev_distance_norm is not None and current_dist >40 and current_dist <240:
-            reward += 0.25 * (self.prev_distance_norm - current_dist_norm)
-        elif self.prev_distance_norm is not None and current_dist <= 40:
-            reward -= 0.40 * (self.prev_distance_norm - current_dist_norm)
+
+
+        # Role-specific optimal distance rewards
+        if self.agent.role == 'archer':
+            optimal_min, optimal_max = 120, 240  # Archer's sweet spot
+            if optimal_min <= current_dist <= optimal_max:
+                # Reward staying in optimal range
+                reward += 0.05  # Small bonus for being in position
+                # Reward moving INTO optimal range
+                if self.prev_distance_norm is not None:
+                    dist_change = (self.prev_distance_norm - current_dist_norm) * max(WIDTH, HEIGHT)
+                    if dist_change > 0:  # Moving closer
+                        reward += 0.02
+            else:
+                # Penalty for being outside optimal range
+                reward -= 0.01
+
+        elif self.agent.role == 'warrior':
+            optimal_max = 40  # Warriors want to be close
+            if current_dist <= optimal_max:
+                reward += 0.05  # Bonus for being in melee range
+                if self.prev_distance_norm is not None:
+                    dist_change = (self.prev_distance_norm - current_dist_norm) * max(WIDTH, HEIGHT)
+                    if dist_change > 0:  # Moving closer
+                        reward += 0.03
+            else:
+                reward -= 0.02  # Penalty for being too far
+
+        elif self.agent.role == 'healer':
+            # Healers want to stay at medium distance, close to allies
+            optimal_min, optimal_max = 80, 160
+            if optimal_min <= current_dist <= optimal_max:
+                reward += 0.03
+            else:
+                reward -= 0.01
+
+
+        # Use a margin (pixels) near any wall
+        margin = 100
+        dist_left   = self.agent.x
+        dist_right  = WIDTH - self.agent.x
+        dist_top    = self.agent.y
+        dist_bottom = HEIGHT - self.agent.y
+        dist_to_wall = min(dist_left, dist_right, dist_top, dist_bottom)
+
+        # Continuous penalty that ramps up near walls
+        if dist_to_wall < margin:
+            # Linearly scale from 0 at margin to -pen_max at the wall
+            pen_max = 0.3
+            wall_pen = -pen_max * (1.0 - dist_to_wall / margin)
+            reward += wall_pen
 
         # Retreat penalty only when not dodging
         is_telegraphed = (self.boss.active_ability is not None)
